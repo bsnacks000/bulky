@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  pgdb:
+    restart: "no"
+    container_name: "bulky_pgdb"
+    image: postgres:15
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=bulkydb
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command: postgres -c 'max_connections=250'
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
+    expose:
+      - "5432"
+    ports:
+      - "5454:5432" # for debugging 
+    shm_size: 1g
+    
+  app:
+    restart: "no"
+    container_name: "bulky_app"
+    image: bulky:dev
+    environment:
+      - DEBUG=true
+      - ASYNCPG_URL=${ASYNCPG_URL}
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    command: sh -c "../wait && uvicorn --host 0.0.0.0 --port 8080 --log-level debug --reload app:app"
+    volumes:
+      - .:/app
+    ports:
+      - "8080:8080"
+    depends_on:
+      pgdb:
+        condition: service_healthy
+
+volumes:
+  pgdata:                                                                        

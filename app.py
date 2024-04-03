@@ -1,0 +1,246 @@
+from fastapi import FastAPI, Depends, File, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
+from contextlib import asynccontextmanager
+
+import asyncpg  # type: ignore
+from starlette.types import Receive, Scope, Send
+
+from sqlalchemy.ext.asyncio import create_async_engine
+import sqlalchemy as sa
+
+from typing import AsyncGenerator, Any, AsyncIterator
+
+import os
+
+POSTGRES_URL = os.getenv("ASYNCPG_URL", "")
+
+from aiodal import dal
+
+db = dal.DataAccessLayer()
+
+
+@asynccontextmanager
+async def lifespan(
+    app: FastAPI,
+) -> AsyncGenerator[Any, Any]:
+    engine = create_async_engine(POSTGRES_URL, max_overflow=5, pool_size=5)
+    metadata = sa.MetaData()
+    await db.reflect(engine, metadata, schema=["meteo", "beis", "hive", "sf"])
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+async def get_transaction() -> AsyncIterator[dal.TransactionManager]:
+
+    async with db.engine.connect() as conn:
+        transaction = dal.TransactionManager(conn, db)
+        try:
+            yield transaction
+            await transaction.commit()
+        except Exception:
+            await transaction.rollback()
+            raise
+
+
+ASYNCPG_DIRECT_URL = POSTGRES_URL.replace("postgresql+asyncpg://", "postgresql://")
+
+
+async def get_asyncpg_connection() -> AsyncIterator[asyncpg.Connection]:
+    conn = await asyncpg.connect(ASYNCPG_DIRECT_URL)
+    try:
+        yield conn
+
+    finally:
+        await conn.close()
+
+
+import io
+import tempfile
+import aiofiles
+
+from aiofiles.threadpool.text import AsyncTextIOWrapper
+from starlette.background import BackgroundTask
+import typing
+
+
+class TempFileResponse(FileResponse):
+
+    def __init__(
+        self,
+        aio_wrapper: AsyncTextIOWrapper,
+        path: str | os.PathLike[str],
+        status_code: int = 200,
+        headers: typing.Mapping[str, str] | None = None,
+        media_type: str | None = None,
+        background: BackgroundTask | None = None,
+        filename: str | None = None,
+        stat_result: os.stat_result | None = None,
+        method: str | None = None,
+        content_disposition_type: str = "attachment",
+    ) -> None:
+        self.aio_wrapper = aio_wrapper
+        super().__init__(
+            path,
+            status_code,
+            headers,
+            media_type,
+            background,
+            filename,
+            stat_result,
+            method,
+            content_disposition_type,
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            print("here")
+            await self.aio_wrapper.close()
+            os.remove(self.aio_wrapper.name)
+
+
+@app.get("/download")
+async def download(conn: asyncpg.Connection = Depends(get_asyncpg_connection)):
+
+    async with aiofiles.tempfile.NamedTemporaryFile("w", delete=False) as fp:
+        print(fp.name)
+        await conn.copy_from_query(
+            "select * from important_data limit 1000000",
+            output=fp.name,
+            format="csv",
+            header=True,
+        )
+        return TempFileResponse(fp, fp.name)
+
+
+import uuid
+
+
+@app.post("/upload")
+async def upload(
+    conn: asyncpg.Connection = Depends(get_asyncpg_connection),
+    f: UploadFile = File(...),
+):
+    async with aiofiles.tempfile.NamedTemporaryFile("wb") as fp:
+        while content := await f.read(2048):  # async read chunk
+            await fp.write(content)  # async write chunk
+        await fp.flush()  # must call flush or we lose data
+
+        async with conn.transaction():
+            # create temp table
+            tabname = "tmp_" + str(uuid.uuid4().hex[:10])
+            await conn.execute(
+                f""" 
+                create temp table {tabname} (
+                    val_a numeric, 
+                    val_b numeric, 
+                    val_c numeric,
+                    val_d numeric,
+                    val_e numeric,
+                    val_f numeric,
+                    val_g numeric,
+                    val_h numeric
+                ) on commit drop;
+        """
+            )
+            await conn.copy_to_table(tabname, source=fp.name, format="csv", header=True)
+
+            await conn.execute(
+                f"""
+                insert into important_data (val_a, val_b, val_c, val_d, val_e, val_f, val_g, val_h)
+                select val_a, val_b, val_c, val_d, val_e, val_f, val_g, val_h from {tabname}
+                on conflict do nothing;
+        """
+            )
+
+    return "ok"
+
+
+import csv
+
+
+@app.post("/upload-iter")
+async def upload(
+    conn: asyncpg.Connection = Depends(get_asyncpg_connection),
+    f: UploadFile = File(...),
+):
+    async with aiofiles.tempfile.NamedTemporaryFile("w") as fp:
+        while content := await f.read(1024):  # async read chunk
+            await fp.write(content.decode())  # async write chunk
+        await fp.flush()  # must call flush or we lose data
+
+        async with conn.transaction():
+            # read line by line
+            # can be used to perform validation but i'm not doing it here... see aiocsv for example parser
+            # https://github.com/MKuranowski/aiocsv/blob/master/aiocsv/readers.py#L16
+            async with aiofiles.open(fp.name, "r") as ff:
+                count = 0
+                async for line in ff:
+                    if count == 0:
+                        count += 1
+                        continue
+                    values = line.replace("\n", "")
+                    await conn.execute(
+                        f"insert into important_data (val_a, val_b, val_c, val_d, val_e, val_f, val_g, val_h) values ({values})"
+                    )
+    return "ok"
+
+
+import pydantic
+from typing import Annotated
+
+
+class ImportantData(pydantic.BaseModel):
+    val_a: float
+    val_b: float
+    val_c: float
+    val_d: float
+    val_e: float
+    val_f: float
+    val_g: float
+    val_h: float
+
+
+@app.post("/upload-iter-validate")
+async def upload(
+    transaction: dal.TransactionManager = Depends(get_transaction),
+    f: UploadFile = File(...),
+):
+    async with aiofiles.tempfile.NamedTemporaryFile("w") as fp:
+        while content := await f.read(1024):  # async read chunk
+            await fp.write(content.decode())  # async write chunk
+        await fp.flush()  # must call flush or we lose data
+
+        async with aiofiles.open(fp.name, "r") as ff:
+            header: list[str] = []
+            async for line in ff:
+                if len(header) == 0:
+                    header = line.replace("\n", "").split(",")
+                    continue
+                cells = line.replace("\n", "").split(",")
+                obj = dict(zip(header, cells))
+                data = ImportantData.model_validate(obj).model_dump()
+                t = transaction.get_table("important_data")
+
+                stmt = sa.insert(t).values(**data)
+                await transaction.execute(stmt)
+    return "ok"
+
+    # async with conn.transaction():
+    #     # read line by line
+    #     # can be used to perform validation but i'm not doing it here... see aiocsv for example parser
+    #     # https://github.com/MKuranowski/aiocsv/blob/master/aiocsv/readers.py#L16
+    #     async with aiofiles.open(fp.name, "r") as ff:
+    #         count = 0
+    #         async for line in ff:
+    #             if count == 0:
+    #                 count += 1
+    #                 continue
+    #             values = line.replace("\n", "")
+    #             await conn.execute(
+    #                 f"insert into important_data (val_a, val_b, val_c, val_d, val_e, val_f, val_g, val_h) values ({values})"
+    #             )
+    # return "ok"
