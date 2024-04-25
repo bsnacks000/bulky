@@ -14,15 +14,30 @@ import os
 
 POSTGRES_URL = os.getenv("ASYNCPG_URL", "")
 
+ASYNCPG_DIRECT_URL = POSTGRES_URL.replace("postgresql+asyncpg://", "postgresql://")
+
 from aiodal import dal
 
 db = dal.DataAccessLayer()
+
+
+class Asyncpg:
+    def __init__(self):
+        self.pool = None
+
+    async def initialize(self, url: str):
+        self.pool = await asyncpg.create_pool(url, min_size=2, max_size=3)
+
+
+apg_db = Asyncpg()
 
 
 @asynccontextmanager
 async def lifespan(
     app: FastAPI,
 ) -> AsyncGenerator[Any, Any]:
+
+    await apg_db.initialize(ASYNCPG_DIRECT_URL)
     engine = create_async_engine(POSTGRES_URL, max_overflow=5, pool_size=5)
     metadata = sa.MetaData()
     await db.reflect(engine, metadata, schema=["meteo", "beis", "hive", "sf"])
@@ -44,16 +59,12 @@ async def get_transaction() -> AsyncIterator[dal.TransactionManager]:
             raise
 
 
-ASYNCPG_DIRECT_URL = POSTGRES_URL.replace("postgresql+asyncpg://", "postgresql://")
-
-
 async def get_asyncpg_connection() -> AsyncIterator[asyncpg.Connection]:
-    conn = await asyncpg.connect(ASYNCPG_DIRECT_URL)
-    try:
-        yield conn
-
-    finally:
-        await conn.close()
+    async with apg_db.pool.acquire() as conn:
+        try:
+            yield conn
+        finally:
+            await conn.close()
 
 
 import io
@@ -106,7 +117,6 @@ class TempFileResponse(FileResponse):
 async def download(conn: asyncpg.Connection = Depends(get_asyncpg_connection)):
 
     async with aiofiles.tempfile.NamedTemporaryFile("w", delete=False) as fp:
-        print(fp.name)
         await conn.copy_from_query(
             "select * from important_data limit 1000000",
             output=fp.name,
