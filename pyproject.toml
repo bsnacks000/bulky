@@ -1,0 +1,32 @@
+[tool.poetry]
+authors = ["bsnacks000 <bsnacks000@gmail.com>"]
+description = ""
+name = "bulky"
+readme = "README.md"
+version = "0.1.0"
+
+[tool.poetry.dependencies]
+aiodal = {git = "https://github.com/cunybpl/aiodal.git", tag = "0.8.0"}
+aiofiles = "24.1.0"
+anyio = "^4"
+minio = "^7.2.7"
+pandas = "^2.2.2"
+python = ">=3.11,<4"
+python-multipart = "^0.0.9"
+pyzmq = "^26.0.3"
+redis = {version = "^4", extras = ["hiredis"]}
+types-redis = "^4.6.0.5"
+uvicorn = {extras = ["standard"], version = "^0.30"}
+xlsxwriter = "^3.2.0"
+
+[tool.poetry.group.dev.dependencies]
+asyncpg-stubs = {version = "*"}
+black = "^24"
+mypy = "^1.11"
+types-aiofiles = {version = "*"}
+types-redis = "^4.6.0.5"
+pandas-stubs = "^2.2.2.240603"
+
+[build-system]
+build-backend = "poetry.core.masonry.api"
+requires = ["poetry-core"]

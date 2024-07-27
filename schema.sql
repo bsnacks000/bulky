@@ -22,3 +22,14 @@ create table public.important_data (
     etag_version uuid not null default gen_random_uuid(), 
     last_updated timestamptz not null default now()
 );
+
+
+create table public.xlsx_task(
+    task_id uuid primary key not null default gen_random_uuid(), 
+    task_status varchar,
+    request jsonb, 
+    xslx bytea, 
+    etag_version uuid not null default gen_random_uuid(), 
+    last_updated timestamptz not null default now()
+);
+

@@ -1,6 +1,7 @@
 fastapi
 uvicorn
-asyncpg
-git+https://github.com/cunybpl/aiodal@0.7.0a4
+git+https://github.com/cunybpl/aiodal@0.8.0
 aiofiles
 python-multipart
+xlsxwriter
+arq

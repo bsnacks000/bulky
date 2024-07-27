@@ -13,7 +13,6 @@ from typing import AsyncGenerator, Any, AsyncIterator
 import os
 
 POSTGRES_URL = os.getenv("ASYNCPG_URL", "")
-
 ASYNCPG_DIRECT_URL = POSTGRES_URL.replace("postgresql+asyncpg://", "postgresql://")
 
 from aiodal import dal
@@ -108,7 +107,6 @@ class TempFileResponse(FileResponse):
         try:
             await super().__call__(scope, receive, send)
         finally:
-            print("here")
             await self.aio_wrapper.close()
             os.remove(self.aio_wrapper.name)
 
@@ -123,7 +121,7 @@ async def download(conn: asyncpg.Connection = Depends(get_asyncpg_connection)):
             format="csv",
             header=True,
         )
-        return TempFileResponse(fp, fp.name)
+    return TempFileResponse(fp, fp.name)
 
 
 import uuid

@@ -1,6 +1,4 @@
-alembic.prod.ini
-alembic.testing.ini 
-alembic.develop.ini
+*.xlsx
 
 *.tar.gz
 .pytest_cache/

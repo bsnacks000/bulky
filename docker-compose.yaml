@@ -1,6 +1,19 @@
 version: '3.8'
 
 services:
+
+  minio:
+    image: docker.io/bitnami/minio:latest
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - 'miniodata:/data'
+    environment:
+      - MINIO_ROOT_USER=minio
+      - MINIO_ROOT_PASSWORD=abc123zxc123
+      - MINIO_DEFAULT_BUCKETS=xlsxstorage
+
   pgdb:
     restart: "no"
     container_name: "bulky_pgdb"
@@ -33,7 +46,7 @@ services:
     build:
       context: .
       dockerfile: ./Dockerfile
-    command: sh -c "../wait && uvicorn --host 0.0.0.0 --port 8080 --log-level debug --reload app:app"
+    command: sh -c "../wait && uvicorn --host 0.0.0.0 --port 8080 --log-level debug --reload bulky.app:app"
     volumes:
       - .:/app
     ports:
@@ -44,3 +57,4 @@ services:
 
 volumes:
   pgdata:                                                                        
+  miniodata:
