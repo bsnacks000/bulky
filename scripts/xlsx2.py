@@ -179,7 +179,7 @@ async def queue():
     db = await setup()  # this part would have already happend in fast api
     mio = minio_setup()
 
-    n_concurrent = 20
+    n_concurrent = 5
     print(f"launching: {n_concurrent}")
     async with anyio.create_task_group() as tg:
         for _ in range(n_concurrent):

@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
 
   minio:
@@ -55,6 +53,31 @@ services:
       pgdb:
         condition: service_healthy
 
+  worker:
+    restart: "no"
+    image: bulky:dev 
+    container_name: "bulk_worker"
+    environment:
+      - DEBUG=true 
+      - REDIS_URL=redis://redis:6379 
+      - ASYNCPG_URL=${ASYNCPG_URL}
+    volumes:
+      - .:/app 
+    command: sh -c "arq bulky.worker.WorkerSettings --watch ./bulky"
+
+  redis:
+    restart: "no"
+    image: redis:7.4.0-alpine
+    container_name: "bulky_redis"
+    volumes:
+      - redis_data:/data
+    expose:
+      - "6379"
+    ports:
+      # localhost debug
+      - "6380:6379"
+
 volumes:
   pgdata:                                                                        
-  miniodata:
+  miniodata:  
+  redis_data:

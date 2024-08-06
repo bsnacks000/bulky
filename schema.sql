@@ -33,3 +33,12 @@ create table public.xlsx_task(
     last_updated timestamptz not null default now()
 );
 
+create table public.async_task(
+    task_id uuid primary key not null default gen_random_uuid(), 
+    task_status varchar,
+    request jsonb, 
+    response jsonb, 
+    etag_version uuid not null default gen_random_uuid(), 
+    last_updated timestamptz not null default now()
+);
+

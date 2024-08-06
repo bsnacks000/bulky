@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, File, UploadFile
+from fastapi import FastAPI, Depends, File, UploadFile, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from contextlib import asynccontextmanager
 
@@ -11,6 +11,11 @@ import sqlalchemy as sa
 from typing import AsyncGenerator, Any, AsyncIterator
 
 import os
+import minio
+
+from .worker import settings as redis_settings
+
+from arq.connections import RedisSettings, ArqRedis, create_pool
 
 POSTGRES_URL = os.getenv("ASYNCPG_URL", "")
 ASYNCPG_DIRECT_URL = POSTGRES_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -18,6 +23,26 @@ ASYNCPG_DIRECT_URL = POSTGRES_URL.replace("postgresql+asyncpg://", "postgresql:/
 from aiodal import dal
 
 db = dal.DataAccessLayer()
+
+
+def minio_setup() -> minio.Minio:
+    return minio.Minio(
+        "minio:9000", access_key="minio", secret_key="abc123zxc123", secure=False
+    )
+
+
+mio = minio_setup()
+
+
+class ArqClient:
+    def __init__(self):
+        self.pool = None
+
+    async def initialize(self, settings: RedisSettings):
+        self.pool = await create_pool(settings)
+
+
+arqc = ArqClient()
 
 
 class Asyncpg:
@@ -39,7 +64,8 @@ async def lifespan(
     await apg_db.initialize(ASYNCPG_DIRECT_URL)
     engine = create_async_engine(POSTGRES_URL, max_overflow=5, pool_size=5)
     metadata = sa.MetaData()
-    await db.reflect(engine, metadata, schema=["meteo", "beis", "hive", "sf"])
+    await db.reflect(engine, metadata)
+    await arqc.initialize(redis_settings)
     yield
 
 
@@ -73,13 +99,14 @@ import aiofiles
 from aiofiles.threadpool.text import AsyncTextIOWrapper
 from starlette.background import BackgroundTask
 import typing
+import tempfile
 
 
 class TempFileResponse(FileResponse):
 
     def __init__(
         self,
-        aio_wrapper: AsyncTextIOWrapper,
+        aio_wrapper: AsyncTextIOWrapper | tempfile._TemporaryFileWrapper,
         path: str | os.PathLike[str],
         status_code: int = 200,
         headers: typing.Mapping[str, str] | None = None,
@@ -107,7 +134,10 @@ class TempFileResponse(FileResponse):
         try:
             await super().__call__(scope, receive, send)
         finally:
-            await self.aio_wrapper.close()
+            if isinstance(self.aio_wrapper, tempfile._TemporaryFileWrapper):
+                self.aio_wrapper.close()
+            else:
+                await self.aio_wrapper.close()
             os.remove(self.aio_wrapper.name)
 
 
@@ -252,3 +282,67 @@ async def upload(
     #                 f"insert into important_data (val_a, val_b, val_c, val_d, val_e, val_f, val_g, val_h) values ({values})"
     #             )
     # return "ok"
+
+
+class TaskResponse(pydantic.BaseModel):
+    task_id: uuid.UUID
+    task_status: str
+    response: dict[str, Any] | None = None
+
+
+async def get_arq_redis() -> AsyncIterator[ArqRedis]:
+    assert arqc.pool
+    yield arqc.pool
+
+
+@app.post("/file", status_code=202)
+async def post_file(
+    transaction: dal.TransactionManager = Depends(get_transaction),
+    arqr: ArqRedis = Depends(get_arq_redis),
+) -> TaskResponse:
+
+    t = transaction.get_table("async_task")
+    id_ = uuid.uuid4()
+    stmt = (
+        sa.insert(t).values(task_id=id_, task_status="PENDING").returning(t.c.task_id)
+    )
+    result = await transaction.execute(stmt)
+    task_id = result.scalar_one()
+
+    # launch task here
+    await arqr.enqueue_job("job", task_id, _job_id=str(id_))
+
+    return TaskResponse(task_id=task_id, task_status="PENDING")
+
+
+# poll
+@app.get("/file/task/{task_id}")
+async def get_task(
+    task_id: str, transaction: dal.TransactionManager = Depends(get_transaction)
+) -> TaskResponse:
+    t = transaction.get_table("async_task")
+    stmt = sa.select(t).where(t.c.task_id == task_id)
+    result = await transaction.execute(stmt)
+    r = result.one_or_none()
+    if not r:
+        raise HTTPException(status_code=404)
+
+    return TaskResponse(
+        task_id=r.task_id, task_status=r.task_status, response=r.response
+    )
+
+
+import tempfile
+
+
+@app.get("/file/{task_id}")
+def get_file(task_id: str) -> FileResponse:
+    # need dependency injection
+    # really should be able to stream directly out aioboto3 ... the
+    with tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
+        data = mio.fget_object(
+            bucket_name="asynctasks",
+            object_name=task_id + ".zip",
+            file_path=tmp.name,
+        )
+        return TempFileResponse(tmp, path=tmp.name)
