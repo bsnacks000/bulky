@@ -1,5 +1,5 @@
 *.xlsx
-
+*.zip
 *.tar.gz
 .pytest_cache/
 *.ipynb

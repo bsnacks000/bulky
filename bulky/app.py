@@ -333,16 +333,21 @@ async def get_task(
 
 
 import tempfile
+import io
+
+# need dependency injection
+# really should be able to stream directly out aioboto3 ... the
+# with tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
+#     data = mio.fget_object(
+#         bucket_name="asynctasks",
+#         object_name=task_id + ".zip",
+#         file_path=tmp.name,
+#     )
+#     return TempFileResponse(tmp, path=tmp.name)
 
 
 @app.get("/file/{task_id}")
-def get_file(task_id: str) -> FileResponse:
-    # need dependency injection
-    # really should be able to stream directly out aioboto3 ... the
-    with tempfile.NamedTemporaryFile("wb", delete=False) as tmp:
-        data = mio.fget_object(
-            bucket_name="asynctasks",
-            object_name=task_id + ".zip",
-            file_path=tmp.name,
-        )
-        return TempFileResponse(tmp, path=tmp.name)
+def get_file(task_id: str) -> StreamingResponse:
+
+    f = mio.get_object(bucket_name="asynctasks", object_name=task_id + ".zip")
+    return StreamingResponse(f.stream())
