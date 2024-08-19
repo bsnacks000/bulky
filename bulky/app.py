@@ -331,6 +331,7 @@ async def get_task(
         task_id=r.task_id, task_status=r.task_status, response=r.response
     )
 
+`X-Task-Status PENDING`
 
 import tempfile
 import io

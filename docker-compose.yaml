@@ -10,7 +10,7 @@ services:
     environment:
       - MINIO_ROOT_USER=minio
       - MINIO_ROOT_PASSWORD=abc123zxc123
-      - MINIO_DEFAULT_BUCKETS=xlsxstorage
+      - MINIO_DEFAULT_BUCKETS=xlsxstorage,asynctasks
 
   pgdb:
     restart: "no"
@@ -64,6 +64,7 @@ services:
     volumes:
       - .:/app 
     command: sh -c "arq bulky.worker.WorkerSettings --watch ./bulky"
+    
 
   redis:
     restart: "no"
