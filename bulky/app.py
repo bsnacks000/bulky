@@ -92,6 +92,15 @@ async def get_asyncpg_connection() -> AsyncIterator[asyncpg.Connection]:
             await conn.close()
 
 
+import aioboto3
+
+
+# async def get_minio_session():
+#     session = aioboto3.Session()
+#     async with session.resource("s3") as s3:
+#         yield s3
+
+
 import io
 import tempfile
 import aiofiles
@@ -331,7 +340,6 @@ async def get_task(
         task_id=r.task_id, task_status=r.task_status, response=r.response
     )
 
-`X-Task-Status PENDING`
 
 import tempfile
 import io
@@ -352,3 +360,33 @@ def get_file(task_id: str) -> StreamingResponse:
 
     f = mio.get_object(bucket_name="asynctasks", object_name=task_id + ".zip")
     return StreamingResponse(f.stream())
+
+
+# b9bb9c09-c918-416f-8be8-333f687a635b
+@app.get("/aiofile/{task_id}")
+async def get_file_aio(task_id: str):
+    session = aioboto3.Session()
+    async with session.client(
+        "s3",
+        endpoint_url="https://minio:9000",
+        aws_access_key_id="minio",
+        aws_secret_access_key="abc123zxc123",
+        use_ssl=False,
+        verify=False,
+    ) as s3:
+        print("hello")
+        s3_ob = await s3.get_object(Bucket="asynctasks", Key=task_id + ".zip")
+        stream = s3_ob["Body"]
+        # print(stream)
+        # print(type(stream))
+        # print(vars(stream))
+        # print(type(stream.content))
+        # print(vars(stream.content))
+        # print("now streaming")
+
+        # StreamingResponse
+        async def _stream_file_data():
+            while stream.content._size:
+                yield await stream.read(10)
+
+        return StreamingResponse(_stream_file_data())
