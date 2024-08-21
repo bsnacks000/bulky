@@ -1,5 +1,6 @@
 import asyncio
 import os
+import aioboto3.session
 import minio
 import zipfile
 import pathlib
@@ -17,6 +18,7 @@ from arq.connections import RedisSettings
 from aiodal import dal
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import create_async_engine
+import aioboto3
 
 wdb = dal.DataAccessLayer()
 
@@ -31,12 +33,18 @@ def minio_setup() -> minio.Minio:
     )
 
 
+def aio_minio_setup() -> aioboto3.Session:
+    session = aioboto3.Session()
+    return session
+
+
 async def startup(ctx: ArqContext):
     db = dal.DataAccessLayer()
     engine = create_async_engine(POSTGRES_URL)
     await db.reflect(engine, sa.MetaData())
     ctx["db"] = db
     ctx["mio"] = minio_setup()
+    ctx["aio"] = aio_minio_setup()
 
 
 async def shutdown(ctx: ArqContext):
@@ -153,11 +161,66 @@ async def job(ctx: ArqContext, task_id: uuid.UUID):
             os.remove(zpath)
 
 
+async def write_aio_minio(session_client, zpath: pathlib.Path):
+    bucket = "asynctasks"
+    print("writing file via aioboto3 for {zpath.name}")
+    try:
+        with zpath.open("rb") as spfp:
+            await session_client.upload_fileobj(spfp, bucket, zpath.name)
+    except Exception as e:
+        print(f"Unable to s3 upload {zpath.name}: {e} ({type(e)})")
+        raise
+
+
+async def aio_job(ctx: ArqContext, task_id: uuid.UUID):
+    db: dal.DataAccessLayer = ctx["db"]
+    session: aioboto3.Session = ctx["aio"]
+
+    fpath = pathlib.Path(str(task_id) + ".csv")
+    zpath = pathlib.Path(str(task_id) + ".zip")
+
+    try:
+        async with dal.transaction(db) as t:
+            await update_state(t, task_id, "PROCESSING")
+
+        # write the csv
+        async with dal.transaction(db) as t:
+            await query(t, fpath)
+
+        # compress into zip (deflate algorithm)
+        await zip_data(fpath, zpath)
+
+        async with session.client(
+            "s3",
+            endpoint_url="https://minio:9000",
+            aws_access_key_id="minio",
+            aws_secret_access_key="abc123zxc123",
+            use_ssl=False,
+            verify=False,
+        ) as s3:
+            await write_aio_minio(s3, zpath)
+
+        async with dal.transaction(db) as t:
+            await update_state(
+                t, task_id, "SUCCESS", response={"url": "file/" + zpath.name}
+            )
+
+    except Exception:
+        async with dal.transaction(db) as t:
+            await update_state(t, task_id, "FAILED")
+
+    finally:
+        if fpath.exists():
+            os.remove(fpath)
+        if zpath.exists():
+            os.remove(zpath)
+
+
 settings = RedisSettings(host="redis", port=6379, max_connections=50)
 
 
 class WorkerSettings:
-    functions = [job]
+    functions = [job, aio_job]
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = settings

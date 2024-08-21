@@ -363,6 +363,39 @@ def get_file(task_id: str) -> StreamingResponse:
 
 
 # b9bb9c09-c918-416f-8be8-333f687a635b
+
+# {'ResponseMetadata': {'RequestId': '17ED7B04736FE656', 'HostId': 'dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8', 'HTTPStatusCode': 200,
+# 'HTTPHeaders': {'accept-ranges': 'bytes', 'content-length': '200',
+# 'content-type': 'application/octet-stream', 'etag': '"fd4e30591fc0cf72b4d70d1622d16969"',
+# 'last-modified': 'Mon, 19 Aug 2024 16:55:42 GMT', 'server': 'MinIO',
+# 'strict-transport-security': 'max-age=31536000; includeSubDomains',
+# 'vary': 'Accept-Encoding', 'x-amz-id-2': 'dd9025bab4ad464b049177c95eb6ebf374d3b3fd1af9251148b658df7ac2e3e8',
+# 'x-amz-request-id': '17ED7B04736FE656', 'x-content-type-options': 'nosniff',
+# 'x-ratelimit-limit': '5799', 'x-ratelimit-remaining': '5799',
+# 'x-xss-protection': '1; mode=block', 'date': 'Tue, 20 Aug 2024 15:58:11 GMT'},
+# 'RetryAttempts': 0}, 'AcceptRanges': 'bytes', 'LastModified': datetime.datetime(2024, 8, 19, 16, 55, 42, tzinfo=tzutc()), 'ContentLength': 200, 'ETag': '"fd4e30591fc0cf72b4d70d1622d16969"', 'ContentType': 'application/octet-stream', 'Metadata': {}, 'Body': <StreamingBody at 0x7121c579e400 for ClientResponse at 0x7121c5b3eb90>}
+
+
+@app.post("/aiofile", status_code=202)
+async def aio_post_file(
+    transaction: dal.TransactionManager = Depends(get_transaction),
+    arqr: ArqRedis = Depends(get_arq_redis),
+) -> TaskResponse:
+
+    t = transaction.get_table("async_task")
+    id_ = uuid.uuid4()
+    stmt = (
+        sa.insert(t).values(task_id=id_, task_status="PENDING").returning(t.c.task_id)
+    )
+    result = await transaction.execute(stmt)
+    task_id = result.scalar_one()
+
+    # launch task here
+    await arqr.enqueue_job("aio_job", task_id, _job_id=str(id_))
+
+    return TaskResponse(task_id=task_id, task_status="PENDING")
+
+
 @app.get("/aiofile/{task_id}")
 async def get_file_aio(task_id: str):
     session = aioboto3.Session()
@@ -374,19 +407,43 @@ async def get_file_aio(task_id: str):
         use_ssl=False,
         verify=False,
     ) as s3:
-        print("hello")
         s3_ob = await s3.get_object(Bucket="asynctasks", Key=task_id + ".zip")
+        print(s3_ob)
+        ob_info = s3_ob["ResponseMetadata"]["HTTPHeaders"]
+        print(ob_info)
         stream = s3_ob["Body"]
-        # print(stream)
-        # print(type(stream))
-        # print(vars(stream))
-        # print(type(stream.content))
-        # print(vars(stream.content))
-        # print("now streaming")
 
         # StreamingResponse
-        async def _stream_file_data():
-            while stream.content._size:
-                yield await stream.read(10)
+        byte_size: int = 10  # can increase
 
-        return StreamingResponse(_stream_file_data())
+        async def _stream_file_data(byte_size: int):
+            while stream.content._size:
+                yield await stream.read(byte_size)
+
+        return StreamingResponse(_stream_file_data(byte_size))
+
+
+# aioboto3 upload example
+# async def upload(
+#     suite: str,
+#     release: str,
+#     filename: str,
+#     staging_path: Path,
+#     bucket: str,
+# ) -> str:
+#     blob_s3_key = f"{suite}/{release}/{filename}"
+
+#     session = aioboto3.Session()
+#     async with session.client("s3") as s3:
+#         try:
+#             with staging_path.open("rb") as spfp:
+#                 LOG.info(f"Uploading {blob_s3_key} to s3")
+#                 await s3.upload_fileobj(spfp, bucket, blob_s3_key)
+#                 LOG.info(f"Finished Uploading {blob_s3_key} to s3")
+#         except Exception as e:
+#             LOG.error(
+#                 f"Unable to s3 upload {staging_path} to {blob_s3_key}: {e} ({type(e)})"
+#             )
+#             return ""
+
+#     return f"s3://{blob_s3_key}"
