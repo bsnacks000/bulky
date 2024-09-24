@@ -13,7 +13,7 @@ from typing import AsyncGenerator, Any, AsyncIterator
 import os
 import minio
 
-from .worker import settings as redis_settings
+from .worker import settings as redis_settings, taskiq_aio_job, broker
 
 from arq.connections import RedisSettings, ArqRedis, create_pool
 
@@ -66,7 +66,24 @@ async def lifespan(
     metadata = sa.MetaData()
     await db.reflect(engine, metadata)
     await arqc.initialize(redis_settings)
+    # yield
+
+    if not broker.is_worker_process:
+        print("starting up broker")
+        await broker.startup()
+
+    # app.state.redis_pool = ConnectionPool.from_url("redis://redis:6379")
     yield
+    # shut down
+    if not broker.is_worker_process:
+        print("Shutting down broker")
+        await broker.shutdown()
+
+    # redis pool disconnect
+    # print("disconnection reidds")
+    # app.state.redis_pool = ConnectionPool.from_url("redis://redis:6379")
+    # await app.state.redis_pool.disconnect()
+    # await redis_pool.disconnect()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -423,27 +440,26 @@ async def get_file_aio(task_id: str):
         return StreamingResponse(_stream_file_data(byte_size))
 
 
-# aioboto3 upload example
-# async def upload(
-#     suite: str,
-#     release: str,
-#     filename: str,
-#     staging_path: Path,
-#     bucket: str,
-# ) -> str:
-#     blob_s3_key = f"{suite}/{release}/{filename}"
+# taskiq
 
-#     session = aioboto3.Session()
-#     async with session.client("s3") as s3:
-#         try:
-#             with staging_path.open("rb") as spfp:
-#                 LOG.info(f"Uploading {blob_s3_key} to s3")
-#                 await s3.upload_fileobj(spfp, bucket, blob_s3_key)
-#                 LOG.info(f"Finished Uploading {blob_s3_key} to s3")
-#         except Exception as e:
-#             LOG.error(
-#                 f"Unable to s3 upload {staging_path} to {blob_s3_key}: {e} ({type(e)})"
-#             )
-#             return ""
 
-#     return f"s3://{blob_s3_key}"
+@app.post("/taskiq/aiofile", status_code=202)
+async def taskiq_aio_post_file(
+    transaction: dal.TransactionManager = Depends(get_transaction),
+) -> TaskResponse:
+
+    t = transaction.get_table("async_task")
+    id_ = uuid.uuid4()
+    stmt = (
+        sa.insert(t).values(task_id=id_, task_status="PENDING").returning(t.c.task_id)
+    )
+    result = await transaction.execute(stmt)
+    task_id = result.scalar_one()
+
+    # launch task here
+    set_task = await taskiq_aio_job.kiq(task_id)
+    set_result = await set_task.wait_result(with_logs=True)
+    print("task sent")
+    print(set_result)
+
+    return TaskResponse(task_id=task_id, task_status="PENDING")

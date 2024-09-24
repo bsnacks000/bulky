@@ -224,3 +224,95 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     redis_settings = settings
+
+
+# taskiq
+# broker set up
+from taskiq_redis import RedisAsyncResultBackend, ListQueueBroker
+from redis.asyncio import ConnectionPool, Redis
+from typing import Annotated
+from taskiq import Context, TaskiqDepends, TaskiqEvents, TaskiqState
+
+
+REDIS_URL = "redis://redis:6379"
+
+# Or you can use PubSubBroker if you need broadcasting
+broker = ListQueueBroker(url=REDIS_URL).with_result_backend(
+    RedisAsyncResultBackend(
+        redis_url=REDIS_URL,
+    )
+)
+
+
+@broker.on_event(TaskiqEvents.WORKER_STARTUP)
+async def broker_startup(state: TaskiqState) -> None:
+    # Here we store connection pool on startup for later use.
+    state.redis = ConnectionPool.from_url(REDIS_URL)
+
+    db = dal.DataAccessLayer()
+    engine = create_async_engine(POSTGRES_URL)
+    await db.reflect(engine, sa.MetaData())
+    state.db = db
+    state.aio = aio_minio_setup()
+
+
+@broker.on_event(TaskiqEvents.WORKER_SHUTDOWN)
+async def broker_shutdown(state: TaskiqState) -> None:
+    # Here we close our pool on shutdown event.
+    db: dal.DataAccessLayer = state.db
+    await db.engine.dispose()
+
+    await state.redis.disconnect()
+
+
+@broker.task
+async def taskiq_aio_job(
+    task_id: uuid.UUID,
+    context: Annotated[Context, TaskiqDepends()],
+):
+    print("in taskiq job")
+    db: dal.DataAccessLayer = context.state.db
+    session: aioboto3.Session = context.state.aio
+
+    fpath = pathlib.Path(str(task_id) + ".csv")
+    zpath = pathlib.Path(str(task_id) + ".zip")
+
+    try:
+        async with dal.transaction(db) as t:
+            print("updating state")
+            await update_state(t, task_id, "PROCESSING")
+
+        # write the csv
+        async with dal.transaction(db) as t:
+            await query(t, fpath)
+
+        # compress into zip (deflate algorithm)
+        await zip_data(fpath, zpath)
+
+        async with session.client(
+            "s3",
+            endpoint_url="https://minio:9000",
+            aws_access_key_id="minio",
+            aws_secret_access_key="abc123zxc123",
+            use_ssl=False,
+            verify=False,
+        ) as s3:
+            print("writitng to minoio")
+            print(zpath)
+            await write_aio_minio(s3, zpath)
+
+        async with dal.transaction(db) as t:
+            print("updating state for success")
+            await update_state(
+                t, task_id, "SUCCESS", response={"url": "file/" + zpath.name}
+            )
+
+    except Exception:
+        async with dal.transaction(db) as t:
+            await update_state(t, task_id, "FAILED")
+
+    finally:
+        if fpath.exists():
+            os.remove(fpath)
+        if zpath.exists():
+            os.remove(zpath)

@@ -77,6 +77,19 @@ services:
     ports:
       # localhost debug
       - "6380:6379"
+  
+  broker:
+    restart: "no"
+    image: bulky:dev
+    container_name: "bulky_broker"
+    environment:
+      - DEBUG=true 
+      - ASYNCPG_URL=${ASYNCPG_URL}
+    volumes :
+      - .:/app
+    command: sh -c "taskiq worker bulky.worker:broker -w 1"
+    depends_on:
+      - redis
 
 volumes:
   pgdata:                                                                        
